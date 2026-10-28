@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pakistan Environmental Monitoring WebGIS</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+ body{margin:0;display:flex;height:100vh;font-family:Arial,sans-serif;font-size:13px}
+ #side{width:330px;padding:10px;overflow:auto;background:#f3f6f4;box-sizing:border-box}
+ #map{flex:1}
+ input,select,button,textarea{width:100%;margin:3px 0;padding:6px;box-sizing:border-box}
+ button{background:#1b6b4a;color:#fff;border:0;cursor:pointer}
+ .grey{background:#777}
+ fieldset{margin:8px 0;border:1px solid #bbb}
+ table{border-collapse:collapse;width:100%;font-size:11px} td,th{border:1px solid #ccc;padding:2px}
+ .legend span{display:inline-block;margin-right:6px}
+ .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:2px}
+</style></head><body>
+<div id="side">
+ <h3>Environmental Monitoring - Pakistan</h3>
+ <div class="legend" id="legend"></div>
+ <select id="fType"><option value="">All types</option><option>Rain Gauge</option><option>Weather Station</option><option>Air Quality Monitor</option><option>Other</option></select>
+ <select id="fStatus"><option value="">All status</option><option>Active</option><option>Inactive</option><option>Maintenance</option></select>
+ <button onclick="loadStations()">Apply filter</button>
+ <div id="count"></div>
+
+ <fieldset id="loginBox"><legend>Authorized login</legend>
+  <input id="u" placeholder="username" value="admin"><input id="p" type="password" placeholder="password">
+  <button onclick="login()">Login</button></fieldset>
+
+ <div id="admin" style="display:none">
+  <fieldset><legend id="stTitle">Station (click map for new location)</legend>
+   <input id="sName" placeholder="Station name">
+   <select id="sType"><option>Rain Gauge</option><option>Weather Station</option><option>Air Quality Monitor</option><option>Other</option></select>
+   <input id="sCity" placeholder="City"><input id="sProv" placeholder="Province">
+   <select id="sStatus"><option>Active</option><option>Inactive</option><option>Maintenance</option></select>
+   <input id="sLat" placeholder="Lat (click map)" readonly><input id="sLng" placeholder="Lng (click map)" readonly>
+   <button onclick="saveStation()">Save station (add / update selected)</button>
+   <button class="grey" onclick="clearStation()">New / clear</button></fieldset>
+
+  <fieldset><legend id="obTitle">Add observation (select a station first)</legend>
+   <input id="oTemp" placeholder="Temperature °C"><input id="oHum" placeholder="Humidity %">
+   <input id="oRain" placeholder="Rainfall mm"><input id="oPm" placeholder="PM2.5 µg/m³">
+   <input id="oWind" placeholder="Wind km/h"><textarea id="oNotes" placeholder="Notes"></textarea>
+   <select id="oSrc"><option value="student-collected">Student-collected</option><option value="official">Official source</option></select>
+   <button onclick="saveObs()">Add observation</button></fieldset>
+ </div>
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const COLORS={'Rain Gauge':'#1e88e5','Weather Station':'#fb8c00','Air Quality Monitor':'#8e24aa','Other':'#607d8b'};
+const $=id=>document.getElementById(id);
+$('legend').innerHTML=Object.entries(COLORS).map(([k,c])=>`<span><i class="dot" style="background:${c}"></i>${k}</span>`).join('');
+
+const map=L.map('map').setView([30.4,69.3],5);       // Pakistan
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors'}).addTo(map);
+const layer=L.layerGroup().addTo(map);
+let token=null, selected=null, pick=null;
+
+// Fetch GeoJSON from backend and draw custom circle markers
+async function loadStations(){
+  const p=new URLSearchParams(); if($('fType').value)p.set('type',$('fType').value); if($('fStatus').value)p.set('status',$('fStatus').value);
+  const gj=await (await fetch('/api/stations?'+p)).json();
+  layer.clearLayers(); $('count').textContent=gj.features.length+' station(s)';
+  gj.features.forEach(f=>{
+    const a=f.properties,[lng,lat]=f.geometry.coordinates;
+    const m=L.circleMarker([lat,lng],{radius:9,color:'#fff',weight:2,fillColor:COLORS[a.type]||'#333',
+      fillOpacity:a.status==='Active'?0.95:0.4}).addTo(layer);
+    m.bindPopup(()=>popupHtml(a)); m.on('click',()=>selectStation(a,lat,lng));
+  });
+}
+const v=x=>x==null?'-':x;
+function popupHtml(a){
+  return `<b>${a.name}</b><br>${a.type} | ${a.city||''}, ${a.province||''}<br>Status: <b>${a.status}</b>
+   <hr>Latest: ${a.observed_at?new Date(a.observed_at).toLocaleString():'no data'}<br>
+   Temp: ${v(a.temperature_c)} °C | Hum: ${v(a.humidity_pct)} %<br>Rain: ${v(a.rainfall_mm)} mm | PM2.5: ${v(a.pm25)} | Wind: ${v(a.wind_kph)} km/h
+   <br><a href="#" onclick="history_(${a.id});return false">Show history</a><div id="hist${a.id}"></div>`;
+}
+async function history_(id){
+  const rows=await (await fetch(`/api/stations/${id}/observations`)).json();
+  $('hist'+id).innerHTML='<table><tr><th>Time</th><th>T</th><th>Rain</th><th>PM2.5</th><th>Src</th></tr>'+
+   rows.slice(0,8).map(r=>`<tr><td>${new Date(r.observed_at).toLocaleDateString()}</td><td>${v(r.temperature_c)}</td><td>${v(r.rainfall_mm)}</td><td>${v(r.pm25)}</td><td>${r.source==='official'?'Off':'Stu'}</td></tr>`).join('')+'</table>';
+}
+function selectStation(a,lat,lng){
+  selected=a.id; if(!token)return;
+  $('stTitle').textContent='Editing station #'+a.id; $('obTitle').textContent='Add observation to: '+a.name;
+  $('sName').value=a.name;$('sType').value=a.type;$('sCity').value=a.city||'';$('sProv').value=a.province||'';
+  $('sStatus').value=a.status;$('sLat').value=lat;$('sLng').value=lng;
+}
+map.on('click',e=>{ if(!token||selected)return;       // new-station location pick only when nothing selected
+  $('sLat').value=e.latlng.lat.toFixed(5);$('sLng').value=e.latlng.lng.toFixed(5);
+  if(pick)map.removeLayer(pick); pick=L.marker(e.latlng).addTo(map);});
+
+async function login(){
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('u').value,password:$('p').value})});
+  const d=await r.json(); if(!r.ok)return alert(d.error);
+  token=d.token; $('admin').style.display='block'; $('loginBox').style.display='none';
+}
+const H=()=>({'Content-Type':'application/json',Authorization:'Bearer '+token});
+async function saveStation(){
+  const b={name:$('sName').value,type:$('sType').value,city:$('sCity').value,province:$('sProv').value,status:$('sStatus').value,lat:parseFloat($('sLat').value),lng:parseFloat($('sLng').value)};
+  if(!b.name||(!selected&&isNaN(b.lat)))return alert('Name and map location required');
+  const r=await fetch(selected?'/api/stations/'+selected:'/api/stations',{method:selected?'PUT':'POST',headers:H(),body:JSON.stringify(b)});
+  if(!r.ok)return alert((await r.json()).error); clearStation(); loadStations();
+}
+function clearStation(){selected=null;['sName','sCity','sProv','sLat','sLng'].forEach(i=>$(i).value='');
+  $('stTitle').textContent='Station (click map for new location)';$('obTitle').textContent='Add observation (select a station first)';
+  if(pick){map.removeLayer(pick);pick=null}}
+async function saveObs(){
+  if(!selected)return alert('Click a station marker first');
+  const b={temperature_c:$('oTemp').value,humidity_pct:$('oHum').value,rainfall_mm:$('oRain').value,pm25:$('oPm').value,wind_kph:$('oWind').value,notes:$('oNotes').value,source:$('oSrc').value};
+  const r=await fetch(`/api/stations/${selected}/observations`,{method:'POST',headers:H(),body:JSON.stringify(b)});
+  if(!r.ok)return alert((await r.json()).error);
+  ['oTemp','oHum','oRain','oPm','oWind','oNotes'].forEach(i=>$(i).value=''); alert('Observation saved'); loadStations();
+}
+loadStations();
+</script></body></html>
